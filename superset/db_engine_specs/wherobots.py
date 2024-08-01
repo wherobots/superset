@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 class WherobotsEngineSpec(BaseEngineSpec):
-    engine = "wherobots"
-    engine_name = "wherobots"
+    engine = "Wherobots"
+    engine_name = "Wherobots"
     supports_dynamic_schema = True
     supports_catalog = True
 
@@ -32,8 +32,8 @@ class WherobotsEngineSpec(BaseEngineSpec):
             connect_args["schema"] = schema
         if catalog:
             connect_args["catalog"] = catalog
-        else:
-            connect_args["catalog"] = "wherobots_open_data"  # Default catalog
+        # else:
+        #     connect_args["catalog"] = "wherobots_open_data"  # Default catalog
         return uri, connect_args
 
     @classmethod
@@ -69,20 +69,52 @@ class WherobotsEngineSpec(BaseEngineSpec):
         logger.info("uses WherobotsEngineSpec - execute() - running...")
         query = cls._append_catalog_name(query)
         query = cls._replace_alias_quotes(query)
-        # Remove GROUP BY geojson if present
-        if "GROUP BY geojson" in query:
-            logger.info(
-                "uses WherobotsEngineSpec - execute() - modifying query - %s",
-                query,
-            )
-            query = query.replace("GROUP BY geojson", "")
-            logger.info(
-                "uses WherobotsEngineSpec - execute() - modified query - %s",
-                query,
-            )
+
+        logger.info(
+            "uses WherobotsEngineSpec - execute() - modifying query - %s",
+            query,
+        )
+
+        # Normalize whitespace for consistent matching
+        normalized_query = " ".join(query.split())
+        logger.info("Normalized query: %s", normalized_query)
+
+        # Handle GROUP BY clauses
+        modified_query = cls._remove_group_by_geojson(normalized_query)
+        logger.info(
+            "Modified query after removing GROUP BY on ST_AsGeoJSON aliases: %s",
+            modified_query,
+        )
 
         # Call the original execute method with the modified query
-        super(WherobotsEngineSpec, cls).execute(cursor, query, database, **kwargs)
+        super(WherobotsEngineSpec, cls).execute(
+            cursor, modified_query, database, **kwargs
+        )
+
+    @staticmethod
+    def _remove_group_by_geojson(query: str) -> str:
+        # Extract aliases for ST_AsGeoJSON with any parameters in the SELECT statement
+        select_clause = re.search(r"SELECT (.*) FROM", query, re.IGNORECASE)
+        if select_clause:
+            select_fields = select_clause.group(1)
+            geojson_aliases = re.findall(
+                r"ST_AsGeoJSON\([^\)]*\)(?:\s+AS\s+(\w+))?",
+                select_fields,
+                re.IGNORECASE,
+            )
+            logger.info("Found geojson aliases: %s", geojson_aliases)
+
+            # Add the original function name with any parameters to the list of aliases
+            geojson_aliases.append(r"ST_AsGeoJSON\([^\)]*\)")
+
+            # Construct regex to remove GROUP BY clauses for these aliases
+            for alias in geojson_aliases:
+                if alias:
+                    # Ensure we match the alias exactly, followed by space or end of string
+                    regex = re.compile(rf"GROUP BY\s+{alias}(?=\s|$)", re.IGNORECASE)
+                    query = re.sub(regex, "", query)
+
+        return query
 
     @staticmethod
     def _replace_alias_quotes(query: str) -> str:
@@ -103,23 +135,30 @@ class WherobotsEngineSpec(BaseEngineSpec):
             statement,
         )
 
-        # Pattern to match FROM, JOIN, and IN followed by a schema.table or schema
+        # Pattern to match FROM, JOIN, and IN with schema.table or schema
         pattern = re.compile(
             r"(?P<keyword>FROM|JOIN|IN)\s+(?P<name>\w+(\.\w+)?)", re.IGNORECASE
         )
 
-        # Replace matched patterns with the prefixed schema name
-        modified_statement = re.sub(
-            pattern,
-            lambda m: f'{m.group("keyword")} wherobots_open_data.{m.group("name")}',
-            statement,
-        )
+        # Find all matches for the pattern
+        matches = pattern.findall(statement)
+        for match in matches:
+            keyword, name, _ = match
+            if (
+                not name.startswith("wherobots_open_data")
+                and not name.startswith("wherobots")
+                and not name.startswith("wherobots_pro_data")
+            ):
+                modified_name = f"wherobots_open_data.{name}"
+                statement = statement.replace(
+                    f"{keyword} {name}", f"{keyword} {modified_name}"
+                )
 
         logger.info(
-            "uses WherobotsEngineSpec - _append_catalog_name() - return statement - %s",
-            modified_statement,
+            "uses WherobotsEngineSpec - _append_catalog_name() - return statement - %s}",
+            statement,
         )
-        return modified_statement
+        return statement
 
     @classmethod
     def epoch_to_dttm(cls) -> str:
